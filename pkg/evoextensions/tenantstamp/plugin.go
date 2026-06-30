@@ -68,17 +68,56 @@ var schemalessTenantTables = map[string]struct{}{
 // callbackName must be unique across registered Create callbacks.
 const callbackName = "evo:tenant_stamp"
 
+// rerouteCallbackName is the SEPARATE reroute-only callback for the
+// schemaless allowlist. It MUST run Before("gorm:begin_transaction")
+// (see routeSchemalessTenantWrite for why) — distinct from the value
+// stamper, which runs Before("gorm:create").
+const rerouteCallbackName = "evo:tenant_reroute"
+
 // Plugin implements gorm.Plugin.
 type Plugin struct{}
 
 // Name returns the plugin identity used by GORM's plugin registry.
 func (Plugin) Name() string { return callbackName }
 
-// Initialize registers a Before("gorm:create") callback that stamps
-// the tenant_id column on every INSERT when the bound model exposes
-// that field.
+// Initialize registers TWO Create callbacks:
+//
+//  1. evo:tenant_reroute — Before("gorm:begin_transaction"): for the
+//     schemaless allowlist (agent_bots), reroutes ConnPool onto the
+//     scope-bound tx BEFORE GORM's default transaction begins, so
+//     GORM's auto-tx becomes a swallowed no-op instead of committing
+//     our request-scoped tx early (see routeSchemalessTenantWrite).
+//  2. evo:tenant_stamp — Before("gorm:create"): stamps the tenant_id
+//     VALUE on models that declare the column (the normal path).
+//
+// They are split so the normal value-stamp path keeps running at its
+// proven position and the reroute fires at the only point where it is
+// correct (before begin_transaction).
 func (Plugin) Initialize(db *gorm.DB) error {
+	if err := db.Callback().Create().Before("gorm:begin_transaction").Register(rerouteCallbackName, rerouteSchemaless); err != nil {
+		return err
+	}
 	return db.Callback().Create().Before("gorm:create").Register(callbackName, stamp)
+}
+
+// rerouteSchemaless is the reroute-only callback (Before begin_transaction).
+// It handles ONLY the schemaless allowlist: a struct WITHOUT a tenant_id
+// field whose table HAS the column (agent_bots). For every other model it
+// is a no-op (the value stamper in `stamp` handles those at gorm:create).
+func rerouteSchemaless(db *gorm.DB) {
+	if db.Statement == nil || db.Statement.Schema == nil {
+		return
+	}
+	ctx := db.Statement.Context
+	if ctx == nil {
+		return
+	}
+	// Only schemaless tables (no tenant_id field on the struct) are rerouted;
+	// models that declare the column take the value-stamp path, untouched.
+	if db.Statement.Schema.LookUpField(columnName) != nil {
+		return
+	}
+	routeSchemalessTenantWrite(db, ctx)
 }
 
 // stamp is the callback body. It is a no-op when:
@@ -98,12 +137,12 @@ func stamp(db *gorm.DB) {
 
 	field := db.Statement.Schema.LookUpField(columnName)
 	if field == nil {
-		// O struct não declara tenant_id. Se a TABELA é do allowlist schemaless
-		// (agent_bots), NÃO podemos preencher o valor no struct — em vez disso
-		// ROTEAMOS o INSERT para a tx GUC-carrying per-request (igual o tenantscope
-		// faz nos reads), onde o GUC app.current_tenant_id está setado, e o DEFAULT
-		// da coluna (migration do gem) preenche o tenant. Fora do allowlist, no-op.
-		routeSchemalessTenantWrite(db, ctx)
+		// O struct não declara tenant_id. O reroute do allowlist schemaless
+		// (agent_bots) NÃO é feito aqui — ele roda no callback dedicado
+		// rerouteSchemaless, Before("gorm:begin_transaction"), porque precisa
+		// rotear a ConnPool ANTES da tx default do GORM começar (ver
+		// routeSchemalessTenantWrite). Aqui (Before gorm:create) só fazemos o
+		// stamp por VALOR; sem coluna, não há o que carimbar → no-op.
 		return
 	}
 	tid := runtimecontext.IDFromContext(ctx)
@@ -148,6 +187,22 @@ func stamp(db *gorm.DB) {
 // no ctx OU sem conn scope-bound → ABORTA (não insere no pool com GUC vazio, o que
 // gravaria a row sem tenant ou violaria NOT NULL silenciosamente). Tabelas fora do
 // allowlist: no-op (mantém o comportamento anterior).
+//
+// POR QUE Before("gorm:begin_transaction") E NÃO Before("gorm:create"):
+// o GORM tem SkipDefaultTransaction=false, então envolve cada Create numa tx
+// própria: gorm:begin_transaction (db.Begin() no pool → abre uma tx nova "gormTx",
+// seta gorm:started_transaction) ... gorm:commit_or_rollback_transaction
+// (db.Commit() na ConnPool atual). Se o reroute rodasse DEPOIS do begin (em
+// gorm:create), a ConnPool no commit já seria a NOSSA tx scope-bound → o GORM
+// daria Commit() nela cedo demais, e o release(true)→tx.Commit() do request
+// estouraria "transaction has already been committed" (HTTP 500), além de vazar
+// a gormTx órfã. Roteando ANTES do begin, a ConnPool já é a *sql.Tx scope-bound
+// quando db.Begin() roda: *sql.Tx não satisfaz TxBeginner/ConnPoolBeginner, então
+// Begin() cai no default→ErrInvalidTransaction, que o BeginTransaction ENGOLE
+// (tx.Error=nil) e NÃO seta gorm:started_transaction → commit_or_rollback vira
+// no-op. Sem tx órfã, sem commit prematuro: o request commita uma vez só, no
+// release. (Verificado em gorm@v1.30.0: finisher_api.go DB.Begin switch +
+// callbacks/transaction.go.)
 func routeSchemalessTenantWrite(db *gorm.DB, ctx context.Context) {
 	if _, ok := schemalessTenantTables[db.Statement.Table]; !ok {
 		return // fora do allowlist → não nos interessa
