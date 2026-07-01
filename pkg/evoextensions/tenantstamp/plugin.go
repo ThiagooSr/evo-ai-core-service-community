@@ -65,6 +65,30 @@ var schemalessTenantTables = map[string]struct{}{
 	"agent_bots": {},
 }
 
+// tenantScopedWriteTables: as 8 tabelas evo_core_* cuja RLS foi apertada para FAIL-CLOSED
+// (migration 20260630000001 — sem o branch `OR GUC IS NULL`). Elas DECLARAM tenant_id no
+// struct, então o `stamp` já carimba o VALOR — MAS a policy WITH CHECK exige que o
+// tenant_id BATA com o GUC app.current_tenant_id da CONEXÃO. O struct-write roda no pool
+// global (GUC vazio) → a policy fail-closed rejeita com 42501 ("new row violates RLS").
+//
+// FIX (o "paired change" que a migration exigia): rotear TAMBÉM o INSERT dessas 8 para a
+// conexão scope-bound (com GUC setado pelo Authorizer), igual ao agent_bots. Aí o valor
+// carimbado bate com o GUC → WITH CHECK passa. O reroute roda ANTES do begin_transaction
+// (evita o double-commit 500). O stamp-por-valor continua (belt+suspenders). Sem este
+// reroute, criar agente/api-key/folder/tool/mcp dava HTTP 500 "Database error".
+//
+// Fonte da lista: as tabelas com policy USING sem `IS NULL` (pg_policy) = as 8 apertadas.
+var tenantScopedWriteTables = map[string]struct{}{
+	"evo_core_agents":             {},
+	"evo_core_api_keys":           {},
+	"evo_core_folders":            {},
+	"evo_core_folder_shares":      {},
+	"evo_core_custom_tools":       {},
+	"evo_core_mcp_servers":        {},
+	"evo_core_custom_mcp_servers": {},
+	"evo_core_agent_integrations": {},
+}
+
 // callbackName must be unique across registered Create callbacks.
 const callbackName = "evo:tenant_stamp"
 
@@ -101,9 +125,20 @@ func (Plugin) Initialize(db *gorm.DB) error {
 }
 
 // rerouteSchemaless is the reroute-only callback (Before begin_transaction).
-// It handles ONLY the schemaless allowlist: a struct WITHOUT a tenant_id
-// field whose table HAS the column (agent_bots). For every other model it
-// is a no-op (the value stamper in `stamp` handles those at gorm:create).
+// It reroutes the INSERT onto the request-scoped, GUC-carrying connection for
+// TWO classes of table:
+//
+//  1. the schemaless allowlist (agent_bots) — a struct WITHOUT a tenant_id
+//     field whose table HAS the column; the DB DEFAULT reads the GUC; and
+//  2. the tenantScopedWriteTables (the 8 evo_core_* tables) — structs that DO
+//     declare tenant_id (so `stamp` value-stamps them at gorm:create) but whose
+//     RLS was tightened to FAIL-CLOSED. A fail-closed WITH CHECK requires the
+//     stamped tenant_id to MATCH the connection's GUC, so the INSERT must run on
+//     the GUC-carrying conn — not the bare pool — or Postgres rejects it (42501).
+//
+// For every other model this is a no-op (the value stamper in `stamp` handles
+// those at gorm:create, on the pool, with a fail-OPEN policy that tolerates
+// GUC-less writes). See routeScopedTenantWrite for the reroute mechanics.
 func rerouteSchemaless(db *gorm.DB) {
 	if db.Statement == nil || db.Statement.Schema == nil {
 		return
@@ -112,12 +147,7 @@ func rerouteSchemaless(db *gorm.DB) {
 	if ctx == nil {
 		return
 	}
-	// Only schemaless tables (no tenant_id field on the struct) are rerouted;
-	// models that declare the column take the value-stamp path, untouched.
-	if db.Statement.Schema.LookUpField(columnName) != nil {
-		return
-	}
-	routeSchemalessTenantWrite(db, ctx)
+	routeScopedTenantWrite(db, ctx)
 }
 
 // stamp is the callback body. It is a no-op when:
@@ -177,16 +207,25 @@ func stamp(db *gorm.DB) {
 	}
 }
 
-// routeSchemalessTenantWrite roteia o INSERT de uma tabela do allowlist schemaless
-// (struct sem tenant_id, tabela COM tenant_id NOT NULL + RLS) para a conexão
-// scope-bound publicada pela camada enterprise (runtimecontext.ConnFromContext) —
-// a tx onde o Authorizer fez set_config('app.current_tenant_id', tid, is_local).
-// Nessa tx o DEFAULT da coluna (migration do gem) resolve o tenant correto e o
-// struct-create segue intacto (RETURNING id popula bot.ID). É o simétrico de WRITE
-// do tenantscope (que roteia os reads). FAIL-CLOSED: tabela do allowlist sem tenant
-// no ctx OU sem conn scope-bound → ABORTA (não insere no pool com GUC vazio, o que
-// gravaria a row sem tenant ou violaria NOT NULL silenciosamente). Tabelas fora do
-// allowlist: no-op (mantém o comportamento anterior).
+// routeScopedTenantWrite roteia o INSERT de uma tabela dos allowlists para a
+// conexão scope-bound publicada pela camada enterprise (runtimecontext.ConnFromContext)
+// — a tx onde o Authorizer fez set_config('app.current_tenant_id', tid, is_local).
+// São DOIS allowlists com propósitos distintos, mas o MESMO reroute serve ambos:
+//
+//   - schemalessTenantTables (agent_bots): o struct NÃO tem tenant_id, então quem
+//     resolve o tenant é o DEFAULT da coluna (migration do gem), que lê o GUC. Sem a
+//     conn com GUC, o DEFAULT viria NULL → NOT NULL violation / row órfã.
+//   - tenantScopedWriteTables (os 8 evo_core_*): o struct TEM tenant_id e o `stamp`
+//     já carimba o VALOR — mas a RLS foi apertada p/ FAIL-CLOSED (WITH CHECK exige
+//     tenant_id = GUC da conn). No pool o GUC é vazio → 42501. Roteando p/ a conn
+//     scope-bound, o valor carimbado bate com o GUC → WITH CHECK passa. (Este é o
+//     "paired change" que a migration 20260630000001 exigia p/ não dar HTTP 500.)
+//
+// Nessa tx o struct-create segue intacto (RETURNING id popula X.ID). É o simétrico de
+// WRITE do tenantscope (que roteia os reads). FAIL-CLOSED: tabela do allowlist sem
+// tenant no ctx OU sem conn scope-bound → ABORTA (não insere no pool com GUC vazio, o
+// que gravaria a row sem tenant, violaria NOT NULL, ou bateria na RLS). Tabelas fora
+// dos allowlists: no-op (seguem o value-stamp path no pool, com policy fail-open).
 //
 // POR QUE Before("gorm:begin_transaction") E NÃO Before("gorm:create"):
 // o GORM tem SkipDefaultTransaction=false, então envolve cada Create numa tx
@@ -203,9 +242,11 @@ func stamp(db *gorm.DB) {
 // no-op. Sem tx órfã, sem commit prematuro: o request commita uma vez só, no
 // release. (Verificado em gorm@v1.30.0: finisher_api.go DB.Begin switch +
 // callbacks/transaction.go.)
-func routeSchemalessTenantWrite(db *gorm.DB, ctx context.Context) {
-	if _, ok := schemalessTenantTables[db.Statement.Table]; !ok {
-		return // fora do allowlist → não nos interessa
+func routeScopedTenantWrite(db *gorm.DB, ctx context.Context) {
+	_, schemaless := schemalessTenantTables[db.Statement.Table]
+	_, failClosed := tenantScopedWriteTables[db.Statement.Table]
+	if !schemaless && !failClosed {
+		return // fora dos allowlists → segue o value-stamp path no pool
 	}
 	// tenant precisa estar bound (igual o tenantscope): sem tenant → fail-closed.
 	if runtimecontext.IDFromContext(ctx) == "" {

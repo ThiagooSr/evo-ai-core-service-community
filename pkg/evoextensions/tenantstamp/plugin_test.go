@@ -322,6 +322,86 @@ func TestReroute_BoundTxNotCommittedByGorm(t *testing.T) {
 	}
 }
 
+// evoCoreAgents mirrors the FAIL-CLOSED allowlist case: the struct DOES
+// declare tenant_id (so `stamp` value-stamps it), AND the table is one of the
+// 8 evo_core_* tables whose RLS was tightened to fail-closed. Its INSERT must
+// therefore ALSO be rerouted onto the GUC-carrying bound tx so the stamped
+// value matches app.current_tenant_id and WITH CHECK passes.
+type evoCoreAgents struct {
+	ID       uuid.UUID `gorm:"type:text;primary_key"`
+	TenantID uuid.UUID `gorm:"column:tenant_id;type:text"`
+	Name     string    `gorm:"type:text"`
+}
+
+func (evoCoreAgents) TableName() string { return "evo_core_agents" }
+
+// TestReroute_FailClosedTable_RoutedToBoundTx is the regression guard for the
+// HTTP-500 "new row violates row-level security policy" fix. A table that HAS a
+// tenant_id field but is in tenantScopedWriteTables must be rerouted onto the
+// bound tx (not the pool), because its fail-closed policy demands GUC == value.
+// We prove the reroute two ways: (1) the stamp still fills tenant_id (value path
+// untouched), and (2) GORM did NOT commit the bound tx (the reroute ran before
+// begin_transaction, same no-double-commit contract as agent_bots).
+func TestReroute_FailClosedTable_RoutedToBoundTx(t *testing.T) {
+	db := openSQLite(t)
+	if err := db.AutoMigrate(&evoCoreAgents{}); err != nil {
+		t.Fatalf("migrate evo_core_agents: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("db.DB(): %v", err)
+	}
+	boundTx, err := sqlDB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin bound tx: %v", err)
+	}
+
+	tenantID := uuid.New()
+	ctx := runtimecontext.WithID(context.Background(), tenantID.String())
+	ctx = runtimecontext.WithConn(ctx, boundTx)
+
+	row := evoCoreAgents{ID: uuid.New(), Name: "fail-closed-agent"}
+	if err := db.WithContext(ctx).Create(&row).Error; err != nil {
+		t.Fatalf("create evo_core_agents: %v", err)
+	}
+
+	// (1) value-stamp still happened: the model carries tenant_id.
+	if row.TenantID != tenantID {
+		t.Fatalf("want tenant_id %s stamped, got %s", tenantID, row.TenantID)
+	}
+
+	// (2) reroute happened before begin: GORM did not consume the bound tx.
+	if err := boundTx.Commit(); err != nil {
+		t.Fatalf("bound tx already consumed by GORM (fail-closed 500 regressed): %v", err)
+	}
+
+	var got evoCoreAgents
+	if err := db.First(&got, "id = ?", row.ID).Error; err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if got.TenantID != tenantID {
+		t.Fatalf("persisted tenant_id mismatch: want %s got %s", tenantID, got.TenantID)
+	}
+}
+
+// TestReroute_FailClosedTable_NoConn_FailsClosed proves the fail-closed table
+// aborts (does not silently insert on the pool) when the request has a tenant
+// but NO scope-bound conn — the "route furou o middleware" case. Inserting on
+// the pool would hit the RLS 42501 anyway; we refuse earlier with ErrScopeUnbound.
+func TestReroute_FailClosedTable_NoConn_FailsClosed(t *testing.T) {
+	db := openSQLite(t)
+	if err := db.AutoMigrate(&evoCoreAgents{}); err != nil {
+		t.Fatalf("migrate evo_core_agents: %v", err)
+	}
+	// tenant bound, but NO WithConn → no GUC-carrying tx available.
+	ctx := runtimecontext.WithID(context.Background(), uuid.New().String())
+	row := evoCoreAgents{ID: uuid.New(), Name: "no-conn"}
+	err := db.WithContext(ctx).Create(&row).Error
+	if err == nil {
+		t.Fatalf("want ErrScopeUnbound (fail-closed), got nil — row inserted on the pool")
+	}
+}
+
 // createCallbackOrder returns the registered Create callback names in
 // execution order, by probing GORM's callback processor.
 func createCallbackOrder(t *testing.T, db *gorm.DB) []string {
