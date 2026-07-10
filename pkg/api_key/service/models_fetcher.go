@@ -22,7 +22,7 @@ type ModelInfo struct {
 // back to the frontend's hardcoded list.
 func ProviderSupportsDynamicModels(provider string) bool {
 	switch provider {
-	case "openai", "anthropic", "gemini", "openrouter", "deepseek", "together_ai", "fireworks_ai":
+	case "openai", "anthropic", "gemini", "openrouter", "deepseek", "together_ai", "fireworks_ai", "groq":
 		return true
 	}
 	return false
@@ -52,6 +52,8 @@ func FetchProviderModels(ctx context.Context, provider, apiKeyPlain string) ([]M
 		models, err = fetchAnthropic(ctx, apiKeyPlain)
 	case "gemini":
 		models, err = fetchGemini(ctx, apiKeyPlain)
+	case "groq":
+		models, err = fetchOpenAICompatible(ctx, "https://api.groq.com/openai/v1/models", apiKeyPlain, provider)
 	default:
 		return nil, fmt.Errorf("dynamic model listing not supported for provider %q", provider)
 	}
