@@ -6,10 +6,8 @@ go 1.24.4
 // (see cmd/api/wire_enterprise.go). The community build never
 // imports it; `go mod tidy` must be run with `-tags=enterprise`
 // to preserve this entry.
-replace github.com/evolution-foundation/evo-enterprise-licensing-go => ../evo-crm-enterprise/evo-enterprise-licensing-go
 
 require (
-	github.com/evolution-foundation/evo-enterprise-licensing-go v0.0.0-00010101000000-000000000000
 	github.com/fernet/fernet-go v0.0.0-20240119011108-303da6aec611
 	github.com/gin-gonic/gin v1.11.0
 	github.com/glebarez/sqlite v1.11.0
@@ -70,7 +68,6 @@ require (
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.57.1 // indirect
-	github.com/redis/go-redis/v9 v9.19.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/ugorji/go/codec v1.3.1 // indirect
@@ -79,7 +76,6 @@ require (
 	go.opentelemetry.io/otel/metric v1.39.0 // indirect
 	go.opentelemetry.io/otel/trace v1.39.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.9.0 // indirect
-	go.uber.org/atomic v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	golang.org/x/arch v0.23.0 // indirect
 	golang.org/x/crypto v0.48.0 // indirect

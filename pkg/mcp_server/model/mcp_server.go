@@ -2,12 +2,15 @@ package model
 
 import (
 	"evo-ai-core-service/internal/utils/stringutils"
+	"evo-ai-core-service/pkg/evoextensions/tenantfield"
 	"time"
 
 	"github.com/google/uuid"
 )
 
 type McpServer struct {
+	tenantfield.TenantField
+
 	ID           uuid.UUID `json:"-" gorm:"<-:create;type:uuid;primary_key;default:uuid_generate_v4()"`
 	Name         string    `json:"-" gorm:"not null; type:varchar(255)"`
 	Description  string    `json:"-" gorm:"type:text"`

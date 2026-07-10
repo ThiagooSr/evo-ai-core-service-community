@@ -3,10 +3,14 @@ package model
 import (
 	"time"
 
+	"evo-ai-core-service/pkg/evoextensions/tenantfield"
+
 	"github.com/google/uuid"
 )
 
 type ApiKey struct {
+	tenantfield.TenantField
+
 	ID        uuid.UUID `json:"-" gorm:"<-:create;type:uuid;primary_key;default:uuid_generate_v4()"`
 	Name      string    `json:"-" gorm:"not null; type:varchar(255)"`
 	Provider  string    `json:"-" gorm:"not null; type:varchar(255)"`

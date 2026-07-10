@@ -129,6 +129,16 @@ func main() {
 	// API v1 routes with EvoAuth authentication
 	v1 := router.Group("/api/v1")
 	v1.Use(evoAuthMiddleware.GetEvoAuthMiddleware())
+	// installRuntimeScope is a build-tagged hook: no-op in the community
+	// build (cmd/api/wire_community.go), wires the enterprise tenant
+	// middleware after EvoAuth when the binary is built with
+	// `-tags=enterprise` (cmd/api/wire_enterprise.go).
+	installRuntimeScope(v1, db)
+	// installGuardian is a build-tagged hook: no-op in the community build
+	// (cmd/api/wire_guardian_community.go), boots the license guardian when the
+	// binary is built with `-tags=guardian` (cmd/api/wire_guardian.go). The
+	// guardian runs for the life of the process on context.Background().
+	installGuardian(context.Background(), db)
 	{
 		customToolModule.Handler.RegisterRoutesMiddleware(v1)
 		customMcpServerModule.Handler.RegisterRoutesMiddleware(v1)

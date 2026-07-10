@@ -2,6 +2,7 @@ package model
 
 import (
 	"evo-ai-core-service/internal/utils/stringutils"
+	"evo-ai-core-service/pkg/evoextensions/tenantfield"
 	"time"
 
 	"github.com/google/uuid"
@@ -9,6 +10,8 @@ import (
 )
 
 type CustomTool struct {
+	tenantfield.TenantField
+
 	ID            uuid.UUID      `json:"-" gorm:"<-:create;type:uuid;primary_key;default:uuid_generate_v4()"`
 	Name          string         `json:"-" gorm:"not null; type:varchar(255)"`
 	Description   string         `json:"-" gorm:"type:text"`
@@ -78,10 +81,20 @@ type CustomToolResponse struct {
 }
 
 type CustomToolListRequest struct {
-	Page     int    `json:"-" binding:"required"`
-	PageSize int    `json:"-" binding:"required"`
-	Search   string `json:"-" binding:"required"`
-	Tags     string `json:"-"`
+	Page     int                    `json:"-" binding:"required"`
+	PageSize int                    `json:"-" binding:"required"`
+	Search   string                 `json:"-" binding:"required"`
+	Tags     string                 `json:"-"`
+	Filters  []CustomToolListFilter `json:"-"`
+}
+
+// CustomToolListFilter is one advanced-filter clause from the Custom Tools list
+// screen (filters[i][attribute_key|filter_operator|values|query_operator]).
+type CustomToolListFilter struct {
+	AttributeKey   string
+	FilterOperator string
+	QueryOperator  string
+	Values         []string
 }
 
 type TestResult struct {
@@ -89,6 +102,7 @@ type TestResult struct {
 	StatusCode   int               `json:"status_code,omitempty"`
 	ResponseTime float64           `json:"response_time,omitempty"`
 	Headers      map[string]string `json:"headers,omitempty"`
+	Body         string            `json:"body,omitempty"`
 	Error        string            `json:"error,omitempty"`
 }
 

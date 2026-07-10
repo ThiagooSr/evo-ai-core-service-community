@@ -2,6 +2,7 @@ package model
 
 import (
 	"evo-ai-core-service/internal/utils/stringutils"
+	"evo-ai-core-service/pkg/evoextensions/tenantfield"
 	"time"
 
 	"github.com/google/uuid"
@@ -9,6 +10,8 @@ import (
 )
 
 type CustomMcpServer struct {
+	tenantfield.TenantField
+
 	ID          uuid.UUID      `json:"-" gorm:"<-:create;type:uuid;primary_key;default:uuid_generate_v4()"`
 	Name        string         `json:"-" gorm:"not null; type:varchar(255)"`
 	Description string         `json:"-" gorm:"type:text"`
@@ -74,10 +77,20 @@ type CustomMcpServerTestResponse struct {
 }
 
 type CustomMcpServerListRequest struct {
-	Page     int    `json:"-" binding:"required"`
-	PageSize int    `json:"-" binding:"required"`
-	Search   string `json:"-" binding:"required"`
-	Tags     string `json:"-"`
+	Page     int                         `json:"-" binding:"required"`
+	PageSize int                         `json:"-" binding:"required"`
+	Search   string                      `json:"-" binding:"required"`
+	Tags     string                      `json:"-"`
+	Filters  []CustomMcpServerListFilter `json:"-"`
+}
+
+// CustomMcpServerListFilter is one advanced-filter clause from the Custom MCP
+// Servers list screen (filters[i][attribute_key|filter_operator|values|query_operator]).
+type CustomMcpServerListFilter struct {
+	AttributeKey   string
+	FilterOperator string
+	QueryOperator  string
+	Values         []string
 }
 
 type CustomMcpServerToolsResponse struct {

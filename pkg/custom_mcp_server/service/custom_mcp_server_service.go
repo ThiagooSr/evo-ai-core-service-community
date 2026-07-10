@@ -11,6 +11,7 @@ import (
 
 	model "evo-ai-core-service/pkg/custom_mcp_server/model"
 	repository "evo-ai-core-service/pkg/custom_mcp_server/repository"
+	"evo-ai-core-service/pkg/evoextensions/runtimecontext"
 	"fmt"
 	"net/http"
 	"strings"
@@ -151,6 +152,22 @@ func (s *customMcpServerService) discoverTools(ctx context.Context, request mode
 	headers := map[string]string{
 		"Content-Type":  "application/json",
 		"Authorization": fmt.Sprintf("Bearer %s", token),
+	}
+
+	// EVO-1623 (GO-4): propagate the active tenant id to the processor
+	// so its runtime_context middleware (PY-1) can authorize the call.
+	// The community runtimecontext returns "" in standalone builds; we
+	// only attach the header when an enterprise scope has bound a real
+	// tenant id, satisfying the "no tenant → omit header" AC.
+	//
+	// The header name is the literal `X-Evo-Tenant-Id` — keep in sync
+	// with `tenant.HeaderTenantID` in evo-enterprise-licensing-go. We
+	// intentionally do NOT import the enterprise SDK constant here to
+	// preserve the community/enterprise decoupling that `runtimecontext`
+	// exists to enforce; the cross-repo contract is asserted by PY-1's
+	// integration tests instead.
+	if tenantID := runtimecontext.IDFromContext(ctx); tenantID != "" {
+		headers["X-Evo-Tenant-Id"] = tenantID
 	}
 
 	tools, err := httpclient.DoPostJSON[model.CustomMcpServerToolsResponse](

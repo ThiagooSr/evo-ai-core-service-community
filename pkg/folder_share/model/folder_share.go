@@ -1,6 +1,7 @@
 package model
 
 import (
+	"evo-ai-core-service/pkg/evoextensions/tenantfield"
 	folderModel "evo-ai-core-service/pkg/folder/model"
 	"time"
 
@@ -8,6 +9,8 @@ import (
 )
 
 type FolderShare struct {
+	tenantfield.TenantField
+
 	ID               uuid.UUID          `json:"-" gorm:"<-:create;type:uuid;primary_key;default:uuid_generate_v4()"`
 	FolderID         uuid.UUID          `json:"-" gorm:"<-:create;type:uuid;not null; type:uuid;references:evo_core_folders(id)"`
 	Folder           folderModel.Folder `json:"-" gorm:"foreignKey:FolderID"`
